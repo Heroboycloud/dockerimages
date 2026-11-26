@@ -1,1 +1,1 @@
-alpine/git:latest
+alpine/mysql:latest
