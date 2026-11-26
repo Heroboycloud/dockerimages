@@ -1,0 +1,120 @@
+name: Pull Docker Images and Release
+
+on:
+  push:
+    branches: [ main, master ]
+    paths: [ 'dock.txt' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  pull-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read and validate dock.txt
+        id: read
+        run: |
+          if [ ! -f dock.txt ]; then
+            echo "::error::dock.txt not found in repository root."
+            exit 1
+          fi
+          
+          # Remove carriage returns, trim whitespace, ignore blank lines and comments
+          IMAGES=$(sed 's/\r$//' dock.txt | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^#' | grep -v '^$')
+          
+          if [ -z "$IMAGES" ]; then
+            echo "::error::dock.txt contains no valid image names."
+            exit 1
+          fi
+          
+          echo "Images to pull:"
+          echo "$IMAGES"
+          
+          # Save to output for next steps (multiline safe)
+          {
+            echo "images<<EOF"
+            echo "$IMAGES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Pull Docker images and save as tar
+        id: save
+        run: |
+          mkdir -p /tmp/docker-tars
+          COUNT=0
+          
+          while IFS= read -r IMAGE; do
+            # Skip empty lines (safety)
+            [ -z "$IMAGE" ] && continue
+            
+            # Sanitize filename: replace / : @ with _
+            FILENAME=$(echo "$IMAGE" | sed 's|[/:@]|_|g')
+            TAR_PATH="/tmp/docker-tars/${FILENAME}.tar"
+            
+            echo "::group::Processing $IMAGE"
+            docker pull "$IMAGE"
+            if [ $? -ne 0 ]; then
+              echo "::error::Failed to pull $IMAGE"
+              exit 1
+            fi
+            
+            docker save -o "$TAR_PATH" "$IMAGE"
+            if [ $? -ne 0 ]; then
+              echo "::error::Failed to save $IMAGE to tar"
+              exit 1
+            fi
+            echo "Saved to $TAR_PATH"
+            echo "::endgroup::"
+            
+            COUNT=$((COUNT + 1))
+          done <<< "${{ steps.read.outputs.images }}"
+          
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          
+          # List generated files for verification
+          ls -lh /tmp/docker-tars/
+
+      - name: Generate release tag
+        id: tag
+        run: |
+          # Tag format: docker-images-YYYYMMDD-HHMMSS-<shortsha>
+          TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          TAG="docker-images-${TIMESTAMP}-${SHORT_SHA}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release and upload assets
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          
+          # Create release (non-draft, public by default on public repos)
+          gh release create "$TAG" \
+            --title "Docker Images ${TAG}" \
+            --notes "Docker images pulled from \`dock.txt\` on $(date -u)" \
+            --repo "${{ github.repository }}"
+          
+          # Upload all tar files
+          gh release upload "$TAG" /tmp/docker-tars/*.tar \
+            --repo "${{ github.repository }}"
+          
+          # Get release URL
+          RELEASE_URL=$(gh release view "$TAG" --repo "${{ github.repository }}" --json url --jq .url)
+          echo "url=$RELEASE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Send ntfy notification
+        if: success()
+        run: |
+          curl -X POST \
+            -H "Title: Docker Images Released" \
+            -H "Tags: package" \
+            -H "Priority: default" \
+            -d "Release: ${{ steps.release.outputs.url }}" \
+            "https://ntfy.sh/az_alerts"
