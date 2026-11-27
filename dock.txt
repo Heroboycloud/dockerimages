@@ -1,1 +1,1 @@
-alpine/ollama:latest
+alpine/dfimage:latest
