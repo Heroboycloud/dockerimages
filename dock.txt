@@ -1,3 +1,1 @@
-frolvlad/alpine-ruby:latest
-ghcr.io/freema/vellum:latest
-tigersmile/nginx-micro:latest
+alpine/ollama:latest
